@@ -2581,6 +2581,9 @@ class MailChimp_WooCommerce_MailChimpApi {
 			return $GDPRfields;
 		}
 
+        $filteredMinutes = (int) apply_filters('mailchimp_checkout_overwrite_gdpr_cache_minutes', $minutes);
+        $minutes = $filteredMinutes <= 0 ? $minutes : $filteredMinutes;
+
 		try {
 			$GDPRfields = $this->getGDPRFields( $list_id );
 			set_transient( $transient, $GDPRfields, 60 * $minutes );
