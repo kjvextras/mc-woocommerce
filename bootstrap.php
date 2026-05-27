@@ -1634,7 +1634,8 @@ function mailchimp_member_data_update($user_email = null, $language = null, $cal
  *
  * @return bool
  */
-function mailchimp_sms_consent_enabled() {
+function mailchimp_sms_consent_active()
+{
     if (!MailChimp_Sms_Consent::isEligibleCountry()) {
         return false;
     }
@@ -1651,8 +1652,12 @@ function mailchimp_sms_consent_enabled() {
         return true;
     }
 
+    return false;
+}
+
+function mailchimp_sms_consent_enabled() {
     // Block checkout path — check the block's "usingSmsConsent" attribute.
-    return mailchimp_sms_block_enabled_in_checkout();
+    return mailchimp_sms_consent_active() && mailchimp_sms_block_enabled_in_checkout();
 }
 
 /**
