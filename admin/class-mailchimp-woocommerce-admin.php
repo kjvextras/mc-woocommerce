@@ -27,6 +27,12 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 	protected $swapped_list_id  = null;
 	protected $swapped_store_id = null;
 
+	// In-request guard for validate() — set to true around server-side
+	// update_option() calls (oauth_finish, create_account_signup) where the
+	// caller's $input is authoritative and the sanitize filter must NOT
+	// rewrite it via getOptions(). See validate().
+	protected $bypass_options_validation = false;
+
 	/** @var null|static */
 	protected static $_instance = null;
 
@@ -53,7 +59,7 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 	/**
 	 * @return array
 	 */
-	private function disconnect_store() {
+	private function disconnect_store($clean_hooks = true) {
 		// remove user from our marketing status audience
 		try {
 			mailchimp_remove_communication_status();
@@ -69,15 +75,32 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 			}
 		}
 
-        Mailchimp_Woocommerce_Event::track('navigation_advanced:disconnect', new DateTime());
-
-        // delete the webhooks on store disconnects.
-		$webhooks = new MailChimp_WooCommerce_WebHooks_Sync;
-		$webhooks->cleanHooks(true);
+        if ($clean_hooks) {
+            Mailchimp_Woocommerce_Event::track('navigation_advanced:disconnect', new DateTime());
+            // delete the webhooks on store disconnects.
+            $webhooks = new MailChimp_WooCommerce_WebHooks_Sync;
+            $webhooks->cleanHooks(true);
+        }
 
 		// clean database
 		mailchimp_clean_database();
-		\Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-waiting-for-login');
+
+		// Cached connection state outlives the wp_options rows we just removed:
+		// the options array is memoized in wp_cache for 10s by
+		// mailchimp_get_admin_options(), this Options instance keeps its own
+		// $plugin_options copy for the rest of the request, and connection
+		// transients (oauth secret, ping check, cached lists, store-id verify,
+		// connection log) live under _transient_* keys that the LIKE query in
+		// mailchimp_clean_database() doesn't match — and aren't in wp_options
+		// at all when an external object cache is in use. Evict them so a
+		// reconnect doesn't see the previous account.
+		wp_cache_delete( 'mailchimp-woocommerce-options', 'mailchimp-woocommerce' );
+		$this->plugin_options = null;
+		$this->removeMiscPointers();
+		\Mailchimp_Woocommerce_DB_Helpers::delete_transient( 'mailchimp-woocommerce-oauth-secret' );
+		if ( class_exists( 'MailChimp_WooCommerce_Enhanced_Logger' ) ) {
+			MailChimp_WooCommerce_Enhanced_Logger::clear_connection_logs();
+		}
 
 		return array();
 	}
@@ -146,6 +169,7 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 				'phpVars',
 				array(
 					'removeReviewBannerRestUrl' => MailChimp_WooCommerce_Rest_Api::url( 'review-banner' ),
+					'restNonce'                 => wp_create_nonce( 'wp_rest' ),
 					'l10n'                      => array(
 						'are_you_sure'                 => __( 'Are you sure?', 'mailchimp-for-woocommerce' ),
 						'log_delete_subtitle'          => __( 'You will not be able to revert.', 'mailchimp-for-woocommerce' ),
@@ -360,17 +384,20 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 				}
 			}
 
-			// this is where we need to cache this data for a longer period of time and only during admin page views.
-			// https://wordpress.org/support/topic/the-plugin-slows-down-the-website-because-of-slow-api/#post-14339311
+			// Cache GDPR fields for 10 minutes to avoid hammering the API.
+			// Uses native get_transient/set_transient (object-cache-aware —
+			// single Redis op with native TTL when available, no wp_options
+			// writes). Single shared transient with updateGDPRFields() so
+			// only one write path maintains the cache.
 			if ( mailchimp_is_configured() && ( $list_id = mailchimp_get_list_id() ) ) {
 				$transient  = "mailchimp-woocommerce-gdpr-fields.{$list_id}";
-				$GDPRfields = \Mailchimp_Woocommerce_DB_Helpers::get_transient( $transient );
+				$GDPRfields = get_transient( $transient );
 				if ( ! is_array( $GDPRfields ) ) {
 					try {
 						$GDPRfields = mailchimp_get_api()->getGDPRFields( $list_id );
-						\Mailchimp_Woocommerce_DB_Helpers::set_transient( $transient, $GDPRfields, 600 );
+						set_transient( $transient, is_array( $GDPRfields ) ? $GDPRfields : array(), 600 );
 					} catch ( Exception $e ) {
-						\Mailchimp_Woocommerce_DB_Helpers::set_transient( $transient, array(), 60 );
+						set_transient( $transient, array(), 60 );
 					}
 				}
 			}
@@ -475,15 +502,61 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		// if the saved version is less than the current version
 		if ( version_compare( $version, $saved_version ) > 0 ) {
 			// resave the site option so this only fires once.
-			\Mailchimp_Woocommerce_DB_Helpers::update_option( 'mailchimp_woocommerce_version', $version );
+			$updated_option = \Mailchimp_Woocommerce_DB_Helpers::update_option( 'mailchimp_woocommerce_version', $version );
 
-			// get plugin options
-			$options = $this->getOptions();
+            mailchimp_log('plugin_updater', 'Updating database from version ' . $saved_version . ' to ' . $version, [
+                'updated_db' => $updated_option,
+            ]);
 
-			// set permission_cap in case there's none set.
-			if ( ! isset( $options['mailchimp_permission_cap'] ) || empty( $options['mailchimp_permission_cap'] ) ) {
+			// RAW DB read — bypass every cache layer in the read path. The
+			// helper's static $option_cache, the wp_cache 10s TTL in
+			// mailchimp_get_admin_options(), and the singleton's
+			// $plugin_options memo can each serve a stale or empty array if
+			// anything earlier in the request poisoned them (e.g. preload at
+			// plugins_loaded@1 ran before the row was written, memoized as
+			// missing, then this code at plugins_loaded@10 still sees the
+			// memoized miss). At this critical migration step we need ground
+			// truth from the DB, not what the cache thinks the DB has.
+			$raw_row = $wpdb->get_var( $wpdb->prepare(
+				"SELECT option_value FROM $wpdb->options WHERE option_name = %s LIMIT 1",
+				$this->plugin_name
+			) );
+			$options = is_string( $raw_row ) ? maybe_unserialize( $raw_row ) : array();
+			if ( ! is_array( $options ) ) {
+				$options = array();
+			}
+
+			// Diagnostic — confirms what update_db_check actually sees at the
+			// moment it decides whether to merge defaults into the blob. If
+			// has_api_key is false here we know the read came back empty and
+			// the guarded write below correctly skips, instead of wiping a
+			// just-saved api_key.
+			mailchimp_log( 'plugin_updater', 'update_db_check read options blob', array(
+				'row_present'       => $raw_row !== null,
+				'option_keys'       => is_array( $options ) ? array_keys( $options ) : null,
+				'has_api_key'       => ! empty( $options['mailchimp_api_key'] ),
+				'has_permission_cap' => ! empty( $options['mailchimp_permission_cap'] ),
+				'auth_from'         => isset( $options['mailchimp_auth_from'] ) ? $options['mailchimp_auth_from'] : null,
+			) );
+
+			// set permission_cap in case there's none set — but ONLY if we
+			// have a real options blob with an api_key. An empty array (or
+			// one missing the api_key) during a fresh connect means the row
+			// is mid-write or our read was poisoned; merging defaults into
+			// that and writing it back would silently destroy the api_key.
+			// Skip the write and let the next run pick it up.
+			if ( ! empty( $options['mailchimp_api_key'] )
+				&& ( ! isset( $options['mailchimp_permission_cap'] ) || empty( $options['mailchimp_permission_cap'] ) ) ) {
 				$options['mailchimp_permission_cap'] = 'administrator';
-				\Mailchimp_Woocommerce_DB_Helpers::update_option( $this->plugin_name, $options );
+				$write_result = \Mailchimp_Woocommerce_DB_Helpers::update_option( $this->plugin_name, $options );
+				mailchimp_log( 'plugin_updater', 'update_db_check wrote permission_cap', array(
+					'write_result' => $write_result,
+					'api_key_preserved' => ! empty( $options['mailchimp_api_key'] ),
+				) );
+			} else {
+				mailchimp_log( 'plugin_updater', 'update_db_check skipped permission_cap write', array(
+					'reason' => empty( $options['mailchimp_api_key'] ) ? 'no_api_key_in_blob' : 'permission_cap_already_set',
+				) );
 			}
 
 			// resend marketing status to update latest changes
@@ -502,7 +575,19 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 			//$this->fix_is_syncing_problem();
 		}
 
-		if ( ! \Mailchimp_Woocommerce_DB_Helpers::get_option( $this->plugin_name . '_cart_table_add_index_update' ) ) {
+		// Carts-table one-time cleanup: add PRIMARY KEY on email column and
+		// de-dupe any existing rows. The outer option flag prevents re-runs
+		// after success, but if DELETE or ALTER TABLE silently returns false
+		// the flag never gets set — so we'd re-run the full check and
+		// cleanup on every admin request forever. Backoff transient
+		// ensures we retry at most once per hour in the failure case.
+		if ( ! \Mailchimp_Woocommerce_DB_Helpers::get_option( $this->plugin_name . '_cart_table_add_index_update' )
+			&& ! get_transient( 'mailchimp_woocommerce_cart_index_check_backoff' ) ) {
+			// Set backoff immediately so a failure doesn't retry until the
+			// hour is up. Success path still removes the need to retry at
+			// all via the option flag.
+			set_transient( 'mailchimp_woocommerce_cart_index_check_backoff', 1, HOUR_IN_SECONDS );
+
 			$check_index_sql = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS WHERE table_schema='{$wpdb->dbname}' AND table_name='{$wpdb->prefix}mailchimp_carts' AND index_name='primary' and column_name='email';";
 			$index_exists    = $wpdb->get_var( $check_index_sql );
 			if ( $index_exists == '1' ) {
@@ -524,15 +609,32 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 			}
 		}
 
-		if ( ! \Mailchimp_Woocommerce_DB_Helpers::get_option( $this->plugin_name . '_woo_currency_update' ) ) {
+		// One-time WooCommerce currency sync with Mailchimp. Success sets
+		// the option flag and never runs again. Failure used to retry on
+		// every admin request — mailchimp_update_woo_settings() calls
+		// syncStore() which hits the Mailchimp API, so uncontrolled
+		// retries meant an API call per admin page load. 1h backoff keeps
+		// the retry cadence sane.
+		if ( ! \Mailchimp_Woocommerce_DB_Helpers::get_option( $this->plugin_name . '_woo_currency_update' )
+			&& ! get_transient( 'mailchimp_woocommerce_currency_sync_backoff' ) ) {
+			set_transient( 'mailchimp_woocommerce_currency_sync_backoff', 1, HOUR_IN_SECONDS );
 			if ( $this->mailchimp_update_woo_settings() ) {
 				\Mailchimp_Woocommerce_DB_Helpers::update_option( $this->plugin_name . '_woo_currency_update', true );
 			}
 		}
 
-		if ( $wpdb->get_var( "SHOW TABLES LIKE '{$wpdb->prefix}mailchimp_jobs';" ) != $wpdb->prefix . 'mailchimp_jobs' ) {
-			MailChimp_WooCommerce_Activator::create_queue_tables();
-			MailChimp_WooCommerce_Activator::migrate_jobs();
+		// Jobs-table existence check. SHOW TABLES hits information_schema on
+		// every admin request, which in practice is wasted work — once we've
+		// confirmed the table exists, re-checking hourly is more than
+		// sufficient to detect a manual drop or corruption. Transient with
+		// 1h TTL stays in Redis/object cache so the actual DB query runs at
+		// most once an hour.
+		if ( ! get_transient( 'mailchimp_woocommerce_jobs_table_verified' ) ) {
+			if ( $wpdb->get_var( "SHOW TABLES LIKE '{$wpdb->prefix}mailchimp_jobs';" ) != $wpdb->prefix . 'mailchimp_jobs' ) {
+				MailChimp_WooCommerce_Activator::create_queue_tables();
+				MailChimp_WooCommerce_Activator::migrate_jobs();
+			}
+			set_transient( 'mailchimp_woocommerce_jobs_table_verified', 1, HOUR_IN_SECONDS );
 		}
 
 		if ( defined( 'DISABLE_WP_HTTP_WORKER' ) || defined( 'MAILCHIMP_USE_CURL' ) || defined( 'MAILCHIMP_REST_LOCALHOST' ) || defined( 'MAILCHIMP_REST_IP' ) || defined( 'MAILCHIMP_DISABLE_QUEUE' ) && true === MAILCHIMP_DISABLE_QUEUE ) {
@@ -572,6 +674,9 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 	}
 
 	public function update_plugin_check() {
+        // only do this on admin pages.
+        if (!is_admin()) return;
+
 		$version = mailchimp_environment_variables()->version;
 
 		// grab the saved version or default to 1.0.3 since that's when we first did this.
@@ -584,7 +689,7 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 
 			$this->update_db_check();
 
-			mailchimp_log('webhooks', 'Ran plugin updater');
+            mailchimp_log('webhooks', 'Ran plugin updater from version ' . $saved_version . ' to ' . $version);
 		}
 	}
 
@@ -745,28 +850,48 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		global $wpdb;
 
 		if ( \Mailchimp_Woocommerce_DB_Helpers::get_option( 'mailchimp_woocommerce_db_mailchimp_carts' ) ) {
-			// need to tidy up the mailchimp_cart table and make sure we don't have anything older than 30 days old.
-			$date = gmdate( 'Y-m-d H:i:s', strtotime( date( 'Y-m-d' ) . '-30 days' ) );
-			$sql  = $wpdb->prepare( "DELETE FROM {$wpdb->prefix}mailchimp_carts WHERE created_at <= %s", $date );
-			$wpdb->query( $sql );
-		} else {
-
-			// create the table for the first time now.
-			$charset_collate = $wpdb->get_charset_collate();
-			$table           = "{$wpdb->prefix}mailchimp_carts";
-
-			$sql = "CREATE TABLE IF NOT EXISTS $table (
-				id VARCHAR (255) NOT NULL,
-				email VARCHAR (100) NOT NULL,
-				user_id INT (11) DEFAULT NULL,
-                cart text NOT NULL,
-                created_at datetime NOT NULL,
-				PRIMARY KEY  (email)
-				) $charset_collate;";
-
-			if ( ( $result = $wpdb->query( $sql ) ) > 0 ) {
-				\Mailchimp_Woocommerce_DB_Helpers::update_option( 'mailchimp_woocommerce_db_mailchimp_carts', true );
+			// Garbage-collect rows older than 30 days. Previously this
+			// DELETE ran on every Mailchimp admin page load, which is
+			// absurdly over-eager for a TTL-based cleanup — throttling to
+			// once per day is plenty fresh (the cart logic itself doesn't
+			// care about rows that are already past the 30-day cutoff).
+			if ( ! get_transient( 'mailchimp_woocommerce_carts_gc_ran' ) ) {
+				set_transient( 'mailchimp_woocommerce_carts_gc_ran', 1, DAY_IN_SECONDS );
+				$date = gmdate( 'Y-m-d H:i:s', strtotime( date( 'Y-m-d' ) . '-30 days' ) );
+				$sql  = $wpdb->prepare( "DELETE FROM {$wpdb->prefix}mailchimp_carts WHERE created_at <= %s", $date );
+				$wpdb->query( $sql );
 			}
+			return;
+		}
+
+		// Create-table branch — gated by the option flag on success, but
+		// if CREATE TABLE returns 0 rows affected (e.g. table already
+		// exists from a previous attempt but the flag write failed), the
+		// old code re-ran this on every request. Backoff transient caps
+		// retries at once per hour.
+		if ( get_transient( 'mailchimp_woocommerce_carts_create_backoff' ) ) {
+			return;
+		}
+		set_transient( 'mailchimp_woocommerce_carts_create_backoff', 1, HOUR_IN_SECONDS );
+
+		$charset_collate = $wpdb->get_charset_collate();
+		$table           = "{$wpdb->prefix}mailchimp_carts";
+
+		$sql = "CREATE TABLE IF NOT EXISTS $table (
+			id VARCHAR (255) NOT NULL,
+			email VARCHAR (100) NOT NULL,
+			user_id INT (11) DEFAULT NULL,
+            cart text NOT NULL,
+            created_at datetime NOT NULL,
+			PRIMARY KEY  (email)
+			) $charset_collate;";
+
+		if ( ( $result = $wpdb->query( $sql ) ) !== false ) {
+			// CREATE TABLE IF NOT EXISTS returns 0 on "already exists" and
+			// still counts as success — set the flag either way so we
+			// don't retry endlessly just because the table was already
+			// there from a previous incomplete attempt.
+			\Mailchimp_Woocommerce_DB_Helpers::update_option( 'mailchimp_woocommerce_db_mailchimp_carts', true );
 		}
 	}
 
@@ -780,6 +905,17 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 	 */
 	public function validate( $input ) {
 
+		// Server-side writes (oauth_finish, create_account_signup) set this
+		// guard before calling update_option() because their $input is
+		// already the authoritative blob to persist. Without this bypass,
+		// the fall-through `return $this->getOptions()` at the bottom would
+		// discard the input and write whatever getOptions() returned —
+		// which, right after disconnect_store(), is an empty array. That's
+		// how the api_key was getting silently stripped before insertion.
+		if ( $this->bypass_options_validation ) {
+			return is_array( $input ) ? $input : array();
+		}
+
 		$active_tab = isset( $input['mailchimp_active_tab'] ) ? $input['mailchimp_active_tab'] : (isset( $input['mailchimp_active_settings_tab'] ) ?  $input['mailchimp_active_settings_tab']: null);
 
 		if ( empty( $active_tab ) && isset( $input['woocommerce_settings_save_general'] ) && $input['woocommerce_settings_save_general'] ) {
@@ -789,11 +925,28 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 
 		if ( \Mailchimp_Woocommerce_DB_Helpers::get_transient( 'mailchimp_disconnecting_store' ) ) {
 			\Mailchimp_Woocommerce_DB_Helpers::delete_transient( 'mailchimp_disconnecting_store' );
+            mailchimp_log('store.disconnect', 'Store is disconnected, returning to connection screen.');
 			return array(
 				'active_tab'        => 'api_key',
 				'mailchimp_api_key' => null,
 				'mailchimp_list'    => null,
 			);
+		}
+
+		// Server-side oauth-finish / create-account-signup paths save the API
+		// key directly to the options blob and set this flag. The page reload
+		// after those callbacks POSTs the settings form with a JS-supplied
+		// mailchimp_api_key field that may be empty/stale on a fresh connect
+		// — letting it through here would clobber the just-saved key. Pull
+		// the authoritative value from the DB and consume the flag so the
+		// next normal save isn't affected.
+		if ( \Mailchimp_Woocommerce_DB_Helpers::get_transient( 'mailchimp_woocommerce_api_key_locked' ) ) {
+			\Mailchimp_Woocommerce_DB_Helpers::delete_transient( 'mailchimp_woocommerce_api_key_locked' );
+			$saved = \Mailchimp_Woocommerce_DB_Helpers::get_option( $this->plugin_name, array() );
+			if ( is_array( $saved ) && ! empty( $saved['mailchimp_api_key'] ) ) {
+                mailchimp_log('store.connect', 'API key is being updated from server-side oauth-finish / create-account-signup.');
+				$input['mailchimp_api_key'] = $saved['mailchimp_api_key'];
+			}
 		}
 
         $skip_api_validation = false;
@@ -880,6 +1033,7 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		// if no API is provided, check if the one saved on the database is still valid, ** only not if disconnect store is issued **.
 		if (!$skip_api_validation && ! $this->is_disconnecting() && ! isset( $input['mailchimp_api_key'] ) && $this->getOption( 'mailchimp_api_key' ) ) {
 			// set api key for validation
+            mailchimp_log('plugin_admin', "setting api key from memory during plugin options update");
 			$input['mailchimp_api_key'] = $this->getOption( 'mailchimp_api_key' );
 			$api_key_valid              = $this->validatePostApiKey( $input );
 
@@ -1021,7 +1175,6 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 	 * Mailchimp OAuth connection finish
 	 */
     public function mailchimp_woocommerce_ajax_oauth_finish() {
-        global $wpdb;
         $this->adminOnlyMiddleware();
         $args = array(
             'domain' => site_url(),
@@ -1035,41 +1188,67 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
             'body'    => json_encode( $args ),
         );
         $response = wp_remote_post( 'https://woocommerce.mailchimpapp.com/api/finish', $pload );
-        mailchimp_log('admin', "finished oauth");
 
         // need to return the error message if this is the problem.
         if ( $response instanceof WP_Error ) {
+            mailchimp_error('admin', "finished oauth error", ['error' => $response->get_error_message()]);
             wp_send_json_error( $response );
         }
 
+        mailchimp_log('admin', "finished oauth", ['response_code' => $response['response']['code']]);
+
         if ( $response['response']['code'] == 200 ) {
 
-            \Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-account_name');
-            \Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-cached-api-lists');
-            \Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-validation.newsletter_settings');
-            \Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-cached-api-ping-check');
-            \Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-validation.api.ping');
+            // remove everything and start over.
+            $this->disconnect_store(false);
+
+            // disconnect_store() sets the 'mailchimp_disconnecting_store'
+            // transient (15s TTL) to flag the form-based disconnect flow.
+            // For this AJAX reconnect path the disconnect is already done
+            // and we're about to write the new key — but the page reload
+            // following this call POSTs the settings form well within 15s,
+            // and validate() would see the lingering transient and return
+            // [mailchimp_api_key => null], wiping the row we're about to
+            // save. Clear it now so the next validate() pass sees the
+            // reconnected state, not a stale disconnect-in-progress flag.
+            \Mailchimp_Woocommerce_DB_Helpers::delete_transient( 'mailchimp_disconnecting_store' );
 
             \Mailchimp_Woocommerce_DB_Helpers::delete_transient( 'mailchimp-woocommerce-oauth-secret' );
             // save api_key? If yes, we can skip api key validation for validatePostApiKey();
             $result = json_decode( $response['body'], true);
-            $options = \Mailchimp_Woocommerce_DB_Helpers::get_option($this->plugin_name);
-            $api_key = $result['access_token'].'-'.$result['data_center'];
-            $options['mailchimp_api_key'] = $api_key;
+            $options = [
+                'mailchimp_auth_from' => 'oauth',
+                'mailchimp_api_key' => $result['access_token'].'-'.$result['data_center']
+            ];
+            // disconnect_store() above deletes the wp_options row, so a raw
+            // $wpdb->update() here would match 0 rows and silently no-op.
+            // The DB helper's update_option() now does an existence check and
+            // routes missing rows to add_option(), which gives us the upsert
+            // we need without going behind WP's back. The bypass guard
+            // around it suppresses our own validate() sanitize filter — see
+            // $this->bypass_options_validation for why.
+            $this->bypass_options_validation = true;
+            $updated = \Mailchimp_Woocommerce_DB_Helpers::update_option( $this->plugin_name, $options, 'yes' );
+            $this->bypass_options_validation = false;
 
-            // \Mailchimp_Woocommerce_DB_Helpers::update_option($this->plugin_name, $options); this used to return false!
-            // go straight to the DB and update the options to bypass any filters.
-            $wpdb->update(
-                $wpdb->options,
-                array('option_value' => maybe_serialize($options)),
-                array('option_name' => $this->plugin_name)
-            );
+            // Lock the API key against form-driven overrides for the next
+            // validate() pass. The page reload after this AJAX call POSTs the
+            // settings form, which still ships a mailchimp_api_key field via
+            // JS (id: mailchimp-woocommerce-mailchimp-api-key). If that field
+            // is empty/stale on a fresh connect, validatePostApiKey() would
+            // overwrite the server-saved key. The flag tells validate() to
+            // ignore the form value and trust what we just wrote here.
+            \Mailchimp_Woocommerce_DB_Helpers::set_transient( 'mailchimp_woocommerce_api_key_locked', true, 5 * MINUTE_IN_SECONDS );
+
+            mailchimp_log('admin', "oauth finished, updated options", ['updated' => $updated]);
+
             Mailchimp_Woocommerce_Event::track('connect_accounts_oauth:complete', new DateTime());
 
-            do_action('mailchimp_woocommerce_connected_to_mailchimp', $api_key);
+            do_action('mailchimp_woocommerce_connected_to_mailchimp', $options['mailchimp_api_key']);
 
             wp_send_json_success( $response );
         } else {
+            mailchimp_error('admin', "finished oauth error", ['error' => $response->get_error_message()]);
             wp_send_json_error( $response );
         }
 
@@ -1220,7 +1399,6 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
     }
 
 	public function mailchimp_woocommerce_ajax_create_account_signup() {
-		global $wpdb;
 		//Mailchimp_Woocommerce_Event::track('account:sign_up_button_click', new DateTime());
 		Mailchimp_Woocommerce_Event::track('connect_accounts:activate_account', new DateTime());
 		$this->adminOnlyMiddleware();
@@ -1228,26 +1406,50 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		$response = wp_remote_post( 'https://woocommerce.mailchimpapp.com/api/signup/', $pload );
 		// need to return the error message if this is the problem.
 		if ( $response instanceof WP_Error ) {
+            mailchimp_error('admin', "create account error", ['error' => $response->get_error_message()]);
 			wp_send_json_error( $response );
 		}
+        mailchimp_log('admin', "create account", ['response_code' => $response['response']['code']]);
 		$response_body = json_decode( $response['body'] );
 		if ( $response['response']['code'] == 200 && $response_body->success == true ) {
-            Mailchimp_Woocommerce_Event::track('connect_accounts:create_account_complete', new DateTime());
+            $this->disconnect_store(false);
+            // Same reason as the oauth-finish path: clear the lingering
+            // 'mailchimp_disconnecting_store' transient (15s TTL) that
+            // disconnect_store() just set, otherwise the post-reload form
+            // POST will hit validate() within the TTL window and get back
+            // [mailchimp_api_key => null], wiping the row we're about to
+            // write.
+            \Mailchimp_Woocommerce_DB_Helpers::delete_transient( 'mailchimp_disconnecting_store' );
             $result = json_decode( $response['body'], true);
-            $options = get_option($this->plugin_name, array());
-            $api_key = $result['data']['oauth_token'].'-'.$result['data']['dc'];
-            $options['mailchimp_api_key'] = $api_key;
-            // go straight to the DB and update the options to bypass any filters.
-            $wpdb->update(
-                $wpdb->options,
-                array('option_value' => maybe_serialize($options)),
-                array('option_name' => $this->plugin_name)
-            );
+            $options = [
+                'mailchimp_auth_from' => 'create_account',
+                'mailchimp_api_key' => $result['data']['oauth_token'].'-'.$result['data']['dc']
+            ];
+            // disconnect_store() above deletes the wp_options row; the helper's
+            // update_option() does an existence check and routes missing rows
+            // to add_option() so the new key gets inserted instead of silently
+            // no-op'd by an UPDATE that matches nothing.
+            // Bypass our own sanitize_option_mailchimp-woocommerce filter
+            // (validate()) for this server-side write — see
+            // $this->bypass_options_validation. Without it, validate()
+            // would discard $options and write whatever getOptions()
+            // returns, which is empty right after disconnect_store().
+            $this->bypass_options_validation = true;
+            $updated = \Mailchimp_Woocommerce_DB_Helpers::update_option( $this->plugin_name, $options, 'yes' );
+            $this->bypass_options_validation = false;
+            // Same lock as the oauth-finish path — the page reload POSTs the
+            // settings form with a JS-supplied api_key field that can be
+            // empty on a fresh connect. validate() consumes this flag and
+            // pulls the api_key from the just-saved DB row instead.
+            \Mailchimp_Woocommerce_DB_Helpers::set_transient( 'mailchimp_woocommerce_api_key_locked', true, 5 * MINUTE_IN_SECONDS );
+            mailchimp_log('admin', "create account finished, updated options", ['updated' => $updated]);
             \Mailchimp_Woocommerce_DB_Helpers::update_option('mailchimp-woocommerce-waiting-for-login', 'waiting');
+            // todo we need to make a profile or metadata call here and save this to the DB before triggering these events.
+            Mailchimp_Woocommerce_Event::track('connect_accounts:create_account_complete', new DateTime());
             Mailchimp_Woocommerce_Event::track('account:verify_email', new DateTime());
             $response_body->redirect = admin_url('admin.php?page=mailchimp-woocommerce');
 
-            do_action('mailchimp_woocommerce_connected_to_mailchimp', $api_key);
+            do_action('mailchimp_woocommerce_connected_to_mailchimp', $options['mailchimp_api_key']);
 
             wp_send_json_success( $response_body );
         } elseif ( $response['response']['code'] == 404 ) {
@@ -1277,6 +1479,7 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
                 && isset( $_POST['data']['_disconnect-nonce'] )
                 && wp_verify_nonce( $_POST['data']['_disconnect-nonce'], '_disconnect-nonce-' . mailchimp_get_store_id() )
             ) {
+            mailchimp_log('admin', "disconnect account flow about to switch account");
             $this->disconnect_store();
             \Mailchimp_Woocommerce_DB_Helpers::delete_option('mailchimp-woocommerce-waiting-for-login');
 
@@ -1587,9 +1790,14 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 			return false;
 		}
 
+		// Ping is a liveness check — short-ish TTL is appropriate so outages
+		// are detected promptly, but 2min was too aggressive and caused
+		// constant expire/rewrite churn on admin sessions. 10min catches
+		// any real outage quickly enough for the UI to react without
+		// hammering the API or the options table.
 		if ( ( $pinged = $this->getCached( 'api-ping-check' ) ) === null ) {
 			if ( ( $pinged = $this->api()->ping( false, $throw_if_not_valid === true ) ) ) {
-				$this->setCached( 'api-ping-check', true, 120 );
+				$this->setCached( 'api-ping-check', true, 10 * MINUTE_IN_SECONDS );
                 if (mailchimp_get_option('api_ping_error')) {
                     $options = get_option($this->plugin_name);
                     $options['api_ping_error'] = null;
@@ -1633,9 +1841,13 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		}
 
 		try {
+			// Account profile essentially never changes after initial connect
+			// (name, id, etc.). Cache for 24h. Settings-save handlers and
+			// explicit disconnect/reconnect flows already bust this via
+			// removeMiscPointers() so staleness isn't a practical concern.
 			if ( ( $account = $this->getCached( 'api-account-name' ) ) === null ) {
 				if ( ( $account = $this->api()->getProfile() ) ) {
-					$this->setCached( 'api-account-name', $account, 300 );
+					$this->setCached( 'api-account-name', $account, DAY_IN_SECONDS );
 				}
 			}
 			return $account;
@@ -1657,10 +1869,16 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		}
 
 		try {
+			// Mailchimp audiences change rarely — new audience creation,
+			// renames, etc. 1h TTL is plenty fresh for the settings UI and
+			// cuts the "expire-and-rewrite" churn dramatically on busy
+			// admin sessions. Users who change a list remote-side can force
+			// a refresh by re-loading settings via the disconnect/reconnect
+			// flow, which clears this transient.
 			if ( ( $pinged = $this->getCached( 'api-lists' ) ) === null ) {
 				$pinged = $this->api()->getLists( true );
 				if ( $pinged ) {
-					$this->setCached( 'api-lists', $pinged, 300 );
+					$this->setCached( 'api-lists', $pinged, HOUR_IN_SECONDS );
                     $this->safelyUpdateGDPRFields();
 				}
 				return $pinged;
@@ -1704,7 +1922,7 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 			if ( ( $lists = $this->getCached( 'api-lists' ) ) === null ) {
 				$lists = $this->api()->getLists( true );
 				if ( $lists ) {
-					$this->setCached( 'api-lists', $lists, 300 );
+					$this->setCached( 'api-lists', $lists, HOUR_IN_SECONDS );
                     $this->safelyUpdateGDPRFields();
 				}
 			}
@@ -1773,7 +1991,19 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		<script type="text/javascript" >
 			jQuery(document).ready(function($) {
 				var endpoint = '<?php echo MailChimp_WooCommerce_Rest_Api::url( 'sync/stats' ); ?>';
+				var restNonce = '<?php echo esc_js( wp_create_nonce( 'wp_rest' ) ); ?>';
 				var on_sync_tab = '<?php echo ( mailchimp_check_if_on_sync_tab() ? 'yes' : 'no' ); ?>';
+
+				// Keep restNonce fresh via WP Heartbeat (avoids 403s on long-lived
+				// admin sessions where the original nonce ages out).
+				$(document).on('heartbeat-tick', function (event, data) {
+					if (data && data.mailchimp_rest_nonce) {
+						restNonce = data.mailchimp_rest_nonce;
+						if (typeof phpVars !== 'undefined') {
+							phpVars.restNonce = data.mailchimp_rest_nonce;
+						}
+					}
+				});
 				var sync_status = '<?php echo ( ( mailchimp_has_started_syncing() && ! mailchimp_is_done_syncing() ) ? 'historical' : 'current' ); ?>';
 				var promo_rulesProgress = 0;
 				var orderProgress = 0;
@@ -1880,7 +2110,18 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 							jQuery('.mc-wc-sync-status-icon-wrapper img').removeClass('mc-wc-d-none');
 						}
 
-						jQuery.get(endpoint, function(response) {
+						jQuery.ajax({
+							url: endpoint,
+							method: 'GET',
+							beforeSend: function (xhr) { xhr.setRequestHeader('X-WP-Nonce', restNonce); }
+						}).fail(function (xhr) {
+							// If the nonce expired before heartbeat could refresh it
+							// (or auth was lost entirely), reload so PHP can emit a
+							// fresh one with the next page render.
+							if (xhr && xhr.status === 403) {
+								document.location.reload(true);
+							}
+						}).done(function (response) {
                             //console.log('sync stats', response);
 							if (response.success) {
 								// if the response is now finished - but the original sync status was "historical"
@@ -1920,25 +2161,46 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 		<?php
 	}
 
+	/**
+	 * Piggyback on the WP Heartbeat to push a fresh wp_rest nonce to the
+	 * browser. Keeps long-lived admin pages (e.g. an open sync screen) from
+	 * 403-ing once the original nonce ages past nonce_life.
+	 *
+	 * @param array $response
+	 * @return array
+	 */
+	public function refresh_rest_nonce_on_heartbeat( $response ) {
+		$response['mailchimp_rest_nonce'] = wp_create_nonce( 'wp_rest' );
+		return $response;
+	}
+
     protected function updateGDPRFields($list_id)
     {
+        if ( empty( $list_id ) ) {
+            return;
+        }
+
+        $transient = "mailchimp-woocommerce-gdpr-fields.{$list_id}";
+
+        // Single source of truth — coordinate with setup() via the SAME
+        // transient and TTL. If it's still warm, skip the API call and the
+        // write entirely. The old `.last_saved` marker + separate "no TTL"
+        // write path used to trigger a duplicate API call + 4+ transient
+        // writes every few minutes; a single TTL'd transient replaces all
+        // of that.
+        if ( get_transient( $transient ) !== false ) {
+            return;
+        }
+
         try {
-            if ( ! empty( $list_id ) && !\Mailchimp_Woocommerce_DB_Helpers::get_transient("mailchimp-woocommerce-gdpr-fields.{$list_id}.last_saved")) {
-                $transient  = "mailchimp-woocommerce-gdpr-fields.{$list_id}";
-                $GDPRfields = mailchimp_get_api()->getGDPRFields( $list_id );
-                \Mailchimp_Woocommerce_DB_Helpers::set_transient( $transient, $GDPRfields );
-                \Mailchimp_Woocommerce_DB_Helpers::set_transient("mailchimp-woocommerce-gdpr-fields.{$list_id}.last_saved", true, 120);
-                mailchimp_log(
-                    'admin',
-                    'updated GDPR fields',
-                    array(
-                        'fields' => $GDPRfields,
-                    )
-                );
-            }
+            $GDPRfields = mailchimp_get_api()->getGDPRFields( $list_id );
+            set_transient( $transient, is_array( $GDPRfields ) ? $GDPRfields : array(), 600 );
+            mailchimp_log( 'admin', 'updated GDPR fields', array( 'fields' => $GDPRfields ) );
         } catch ( Exception $e ) {
-            \Mailchimp_Woocommerce_DB_Helpers::set_transient( $transient, array(), 60 );
-            mailchimp_error( 'admin', 'updating GDPR fields failed '.$e->getMessage() );
+            // Negative-cache the failure for 60s so we don't hammer the API
+            // during an outage. Next refresh cycle will retry.
+            set_transient( $transient, array(), 60 );
+            mailchimp_error( 'admin', 'updating GDPR fields failed ' . $e->getMessage() );
         }
     }
 

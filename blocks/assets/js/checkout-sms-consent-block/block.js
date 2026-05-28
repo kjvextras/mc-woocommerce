@@ -84,7 +84,7 @@ const Block = ( {text, userSubscribed, checkoutExtensionData, defaultDisclaimer,
 
 	// Reset checkbox if country becomes ineligible
 	useEffect( () => {
-		if ( billingCountry && ! isCountryEligible( billingCountry ) ) {
+		if ( checked && smsPhone && billingCountry && ! isCountryEligible( billingCountry ) ) {
 			setChecked( false );
 			setSmsPhone( '' );
 			setValidationErrors( {
@@ -93,7 +93,7 @@ const Block = ( {text, userSubscribed, checkoutExtensionData, defaultDisclaimer,
 					hidden: true,
 				}
 			} );
-			console.log('Resetting SMS consent to false because billing country is not eligible: ' + billingCountry);
+			console.log('Resetting SMS consent to false because billing country is not eligible: ' + billingCountry, checked, smsPhone);
 		}
 		// console.log('billing country', billingCountry);
 		// console.log('countries', smsSendingCountries);
@@ -139,6 +139,7 @@ const Block = ( {text, userSubscribed, checkoutExtensionData, defaultDisclaimer,
 
 						<PhoneInputWithCountrySelect
 							id="mailchimp-sms-phone"
+							className="wc-block-components-text-input"
 							defaultCountry={billingCountry || 'US'}
 							countries={smsSendingCountries}
 							label={__('SMS Phone Number', 'mailchimp-for-woocommerce')}
