@@ -1024,7 +1024,7 @@ class MailChimp_WooCommerce_MailChimpApi {
             // Try to get SMS settings for the audience
             $result = $this->get( "lists/{$list_id}/sms-program" );
 
-            if ( isset( $result['sms_enabled'] ) && $result['sms_enabled'] ) {
+            if (!empty($result['sms_program'][0]['can_send'])) {
                 return array(
                     'enabled' => true,
                     'sending_countries' => isset( $result['sending_countries'] ) ? $result['sending_countries'] : array(),
@@ -1050,7 +1050,7 @@ class MailChimp_WooCommerce_MailChimpApi {
         $cached = mailchimp_get_transient( $transient_key );
 
         if ( $cached !== false ) {
-            return $cached;
+            return $cached['value'];
         }
 
         try {
@@ -1062,7 +1062,6 @@ class MailChimp_WooCommerce_MailChimpApi {
             return false;
         }
     }
-
     /**
      * Check if a country is in the merchant's SMS sending countries
      *
