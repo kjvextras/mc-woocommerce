@@ -359,11 +359,12 @@ class MailChimp_WooCommerce
 			$this->loader->add_action($render_on, $service, 'applyNewsletterField');
 
 			$this->loader->add_action('woocommerce_ppe_checkout_order_review', $service, 'applyNewsletterField');
-			$this->loader->add_action('woocommerce_register_form', $service, 'applyNewsletterFieldToRegisterForm');
 
 			$this->loader->add_action('woocommerce_checkout_order_processed', $service, 'processNewsletterField', 10, 2);
 			$this->loader->add_action('woocommerce_ppe_do_payaction', $service, 'processPayPalNewsletterField');
-			$this->loader->add_action('woocommerce_register_post', $service, 'processRegistrationForm', 10, 3);
+
+            $this->loader->add_action('woocommerce_register_form', $service, 'applyNewsletterFieldToRegisterForm');
+            $this->loader->add_action('woocommerce_register_post', $service, 'processRegistrationForm', 10, 3);
 		}
 	}
 
@@ -383,6 +384,10 @@ class MailChimp_WooCommerce
 
                 $this->loader->add_action('woocommerce_checkout_order_processed', $sms_consent, 'processSmsConsentField', 10, 2);
                 $this->loader->add_action('woocommerce_ppe_do_payaction', $sms_consent, 'processPayPalSmsConsentField');
+                $this->loader->add_action('woocommerce_register_post', $sms_consent, 'processRegistrationForm', 10, 3);
+
+                $this->loader->add_action('woocommerce_register_form', $sms_consent, 'applySmsFieldToRegisterForm');
+                $this->loader->add_action('woocommerce_register_post', $sms_consent, 'processRegistrationForm', 10, 3);
             }
         }
     }
