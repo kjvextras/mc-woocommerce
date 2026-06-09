@@ -177,6 +177,16 @@ class MailChimp_WooCommerce_Single_Order extends Mailchimp_Woocommerce_Job
             $this->landing_site = null;
         }
 
+        // if this is not currently in mailchimp - and we have the saved GDPR fields from
+        // we can use the post meta for gdpr fields that were saved during checkout.
+        if (!$this->is_full_sync && $new_order && empty($this->gdpr_fields)) {
+            $this->gdpr_fields = $this->woo_order->get_meta('mailchimp_woocommerce_gdpr_fields');
+            mailchimp_debug('order_submit', "GDPR fields are not set on a new order so we are pulling them from order meta", [
+                'order_id' => $this->id,
+                'gdpr_fields' => $this->gdpr_fields
+            ]);
+        }
+
         $email = null;
 
         try {
@@ -210,7 +220,8 @@ class MailChimp_WooCommerce_Single_Order extends Mailchimp_Woocommerce_Job
             $email = $order->getCustomer()->getEmailAddress();
             // see if we have a bad email
 
-            if ($this->shouldSkipOrder($email, $order->getId())) {
+            $sms_consent_enabled = mailchimp_sms_consent_enabled();
+            if (!$sms_consent_enabled && $this->shouldSkipOrder($email, $order->getId())) {
                 return false;
             }
 
@@ -349,12 +360,6 @@ class MailChimp_WooCommerce_Single_Order extends Mailchimp_Woocommerce_Job
                 if (($campaign_id = $api_response->getCampaignId()) && !empty($campaign_id)) {
                     $log .= " :: campaign id {$campaign_id}";
                 }
-            }
-
-            // if this is not currently in mailchimp - and we have the saved GDPR fields from
-            // we can use the post meta for gdpr fields that were saved during checkout.
-            if (!$this->is_full_sync && $new_order && empty($this->gdpr_fields)) {
-                $this->gdpr_fields = $this->woo_order->get_meta('mailchimp_woocommerce_gdpr_fields');
             }
 
             // Maybe sync subscriber to set correct member.language

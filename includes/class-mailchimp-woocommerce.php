@@ -256,6 +256,7 @@ class MailChimp_WooCommerce
         $this->loader->add_action('init', $plugin_admin, 'update_plugin_check', 13);
         $this->loader->add_action('admin_init', $plugin_admin, 'setup_survey_form');
         $this->loader->add_action('admin_footer', $plugin_admin, 'inject_sync_ajax_call');
+        $this->loader->add_filter('heartbeat_send', $plugin_admin, 'refresh_rest_nonce_on_heartbeat');
 
         // update MC store information when woocommerce general settings are saved
         $this->loader->add_action('woocommerce_settings_save_general', $plugin_admin, 'mailchimp_update_woo_settings');
@@ -358,7 +359,7 @@ class MailChimp_WooCommerce
 			$this->loader->add_action($render_on, $service, 'applyNewsletterField');
 
 			$this->loader->add_action('woocommerce_ppe_checkout_order_review', $service, 'applyNewsletterField');
-			$this->loader->add_action('woocommerce_register_form', $service, 'applyNewsletterField');
+			$this->loader->add_action('woocommerce_register_form', $service, 'applyNewsletterFieldToRegisterForm');
 
 			$this->loader->add_action('woocommerce_checkout_order_processed', $service, 'processNewsletterField', 10, 2);
 			$this->loader->add_action('woocommerce_ppe_do_payaction', $service, 'processPayPalNewsletterField');
@@ -406,6 +407,7 @@ class MailChimp_WooCommerce
 
 			// campaign tracking
 			$this->loader->add_action( 'init', $service, 'handleCampaignTracking' );
+			$this->loader->add_action( 'woocommerce_order_save_attribution_data', $service, 'inject_mailchimp_attribution', 100, 2 );
 
 			// order hooks
             $this->loader->add_action('woocommerce_order_status_changed', $service, 'handleOrderStatusChanged', 11, 3);

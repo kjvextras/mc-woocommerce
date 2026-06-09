@@ -157,10 +157,10 @@ class MailChimp_Service extends MailChimp_WooCommerce_Options
 
 		// on order save
         if ($is_subscribed) {
-            MailChimp_WooCommerce_HPOS::update_order_meta($order_id, 'mailchimp_woocommerce_is_subscribed', $is_subscribed);
+            MailChimp_WooCommerce_HPOS::update_order_meta($order_id, 'mailchimp_woocommerce_is_subscribed', true);
 	        if ($order = MailChimp_WooCommerce_HPOS::get_order($order_id)) {
 				if ($user_id = $order->get_user_id()) {
-					update_user_meta($user_id, 'mailchimp_woocommerce_is_subscribed', $is_subscribed);
+					update_user_meta($user_id, 'mailchimp_woocommerce_is_subscribed', true);
 				}
 	        }
         }
@@ -907,6 +907,46 @@ class MailChimp_Service extends MailChimp_WooCommerce_Options
         if (isset($_GET['mc_eid'])) {
             mailchimp_set_cookie('mailchimp_email_id', trim($_GET['mc_eid']), $cookie_duration, '/' );
         }
+
+        if (isset($_GET['mc_cid'])) {
+            $campaign = sanitize_text_field( wp_unslash($_GET['mc_cid']));
+            if ( function_exists('WC') && $campaign) {
+                WC()->session->set( 'mc_cid', $campaign );
+            }
+
+            mailchimp_set_cookie('mailchimp_campaign_id', $campaign, $cookie_duration, '/' );
+        }
+    }
+
+    function inject_mailchimp_attribution(WC_Order $order, array $params )
+    {
+        if ( ! function_exists( 'WC' ) || ! WC()->session ) {
+            return;
+        }
+
+        $session_entry = $params['session_entry'] ?? null;
+
+        if ( empty($session_entry) ) {
+            return;
+        }
+        parse_str( parse_url( $session_entry, PHP_URL_QUERY ), $query_params );
+
+        $mc_cid = $query_params['mc_cid'] ?? WC()->session->get( 'mc_cid' ) ?? null;
+
+        if ( empty( $mc_cid ) ) {
+            return;
+        }
+
+        $prefix = '_wc_order_attribution_';
+
+        if ( ! empty( $mc_cid ) ) {
+            $order->update_meta_data( $prefix . 'utm_campaign', $mc_cid );
+            $order->update_meta_data( $prefix . 'source_type', 'utm' );
+            $order->update_meta_data( $prefix . 'utm_source',  'mailchimp' );
+            $order->update_meta_data( $prefix . 'utm_medium',  'email' );
+        }
+
+        $order->save_meta_data();
     }
 
     /**
