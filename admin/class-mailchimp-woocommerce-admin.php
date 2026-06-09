@@ -132,13 +132,13 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
 	 * @since    1.0.0
 	 */
 	public function enqueue_styles( $hook ) {
-		wp_enqueue_style( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'css/mailchimp-woocommerce-admin.css', array(), $this->version . '.21' );
+		wp_enqueue_style( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'css/mailchimp-woocommerce-admin.css', array(), $this->version );
 
 		if ( strpos( $hook, 'page_mailchimp-woocommerce' ) !== false || strpos( $hook, 'create-mailchimp-account' ) !== false) {
 			if ( get_bloginfo( 'version' ) < '5.3' ) {
 				wp_enqueue_style( $this->plugin_name . '-settings', plugin_dir_url( __FILE__ ) . 'css/mailchimp-woocommerce-admin-settings-5.2.css', array(), $this->version );
 			}
-			wp_enqueue_style( $this->plugin_name . '-settings', plugin_dir_url( __FILE__ ) . 'css/mailchimp-woocommerce-admin-settings.css', array(), $this->version . '.01' );
+			wp_enqueue_style( $this->plugin_name . '-settings', plugin_dir_url( __FILE__ ) . 'css/mailchimp-woocommerce-admin-settings.css', array(), $this->version );
 			// Update v2
 			wp_enqueue_style( $this->plugin_name . '-settings-v2', plugin_dir_url( __FILE__ ) . 'v2/assets/css/styles.css', array(), $this->version);
 			// End update v2
