@@ -1047,7 +1047,7 @@ class MailChimp_WooCommerce_MailChimpApi {
      */
     public function getCachedSmsApplicationStatus( $list_id ) {
         $transient_key = "mailchimp_sms_status_{$list_id}";
-        $cached = mailchimp_get_transient( $transient_key );
+        $cached = mailchimp_get_transient( $transient_key, false );
 
         if ( $cached !== false ) {
             return $cached['value'];
