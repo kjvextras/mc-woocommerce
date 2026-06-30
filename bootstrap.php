@@ -2060,7 +2060,11 @@ function mailchimp_sms_consent_active()
         return false;
     }
 
-    // Classic checkout path — admin toggled the option on.
+    return true;
+}
+
+function mailchimp_sms_consent_enabled_in_classic_checkout()
+{
     $options = mailchimp_get_admin_options();
     if (!empty($options['mailchimp_sms_consent_enabled'])) {
         return true;
@@ -2070,8 +2074,10 @@ function mailchimp_sms_consent_active()
 }
 
 function mailchimp_sms_consent_enabled() {
+    // Classic checkout path — admin toggled the option on.
+
     // Block checkout path — check the block's "usingSmsConsent" attribute.
-    return mailchimp_sms_consent_active() && mailchimp_sms_block_enabled_in_checkout();
+    return mailchimp_sms_consent_active() && (mailchimp_sms_block_enabled_in_checkout() || mailchimp_sms_consent_enabled_in_classic_checkout());
 }
 
 /**
