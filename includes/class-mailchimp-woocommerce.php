@@ -377,7 +377,7 @@ class MailChimp_WooCommerce
             $sms_consent->setVersion($this->version);
 
             $render_on = $sms_consent->getOption('mailchimp_sms_consent_checkbox_action', 'woocommerce_after_checkout_billing_form');
-            $sms_consent_allowed = mailchimp_sms_consent_active();
+            $sms_consent_allowed = mailchimp_sms_consent_enabled();
 
             if ($sms_consent_allowed) {
                 $this->loader->add_action($render_on, $sms_consent, 'applyField');

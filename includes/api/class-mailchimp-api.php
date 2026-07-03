@@ -720,7 +720,9 @@ class MailChimp_WooCommerce_MailChimpApi {
             'sms_phone' => $sms_phone,
             'marketing_consent' => array(
                 'status' => $subscribed ? 'confirmed' : 'pending',
-                'source' => 'Mailchimp for Woocommerce',
+                'source' => array(
+                    'name' => 'Mailchimp for Woocommerce',
+                ),
             ),
         );
 
@@ -756,7 +758,9 @@ class MailChimp_WooCommerce_MailChimpApi {
                 'email' => $email,
                 'marketing_consent' => [
                     'status' => $email_subscribed ? 'confirmed' : 'unknown',
-                    'source' => 'Mailchimp for Woocommerce',
+                    'source' => array(
+                        'name' => 'Mailchimp for Woocommerce',
+                    ),
                 ]
             ],
             'sms_channel' => $sms_channel,
@@ -816,7 +820,9 @@ class MailChimp_WooCommerce_MailChimpApi {
             'sms_phone' => $sms_phone,
             'marketing_consent' => array(
                 'status' => $subscribed ? 'confirmed' : 'unsubscribed',
-                'source' => 'Mailchimp for Woocommerce',
+                'source' => array(
+                    'name' => 'Mailchimp for Woocommerce',
+                ),
             ),
         );
 
