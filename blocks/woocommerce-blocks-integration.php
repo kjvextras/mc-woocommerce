@@ -221,6 +221,8 @@ class Mailchimp_Woocommerce_Newsletter_Blocks_Integration implements Integration
      */
     public static function order_processed($order, $request)
     {
+        mailchimp_log('newsletter_block', 'calling_order_processed');
+
         $meta_key = 'mailchimp_woocommerce_is_subscribed';
         $optin = $request['extensions']['mailchimp-newsletter']['optin'];
         $gdpr_fields = isset($request['extensions']['mailchimp-newsletter']['gdprFields']) ?

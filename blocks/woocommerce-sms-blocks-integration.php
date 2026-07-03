@@ -239,6 +239,7 @@ class Mailchimp_Woocommerce_Sms_Blocks_Integration implements IntegrationInterfa
      */
     public static function order_processed($order, $request)
     {
+        mailchimp_log('sms_blocks', 'calling_order_processed');
         if (!mailchimp_sms_consent_enabled()) {
             return;
         }
