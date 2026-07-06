@@ -137,7 +137,7 @@ class MailChimp_WooCommerce_HPOS {
 				'numberposts' => 1,
 				'meta_key'    => '_order_number',
 				'meta_value'  => $order_number,
-				'post_type'   => 'shop_order',
+				'post_type'   => mailchimp_get_order_post_type_list(),
 				'post_status' => 'any',
 				'fields'      => 'ids',
 			]);

@@ -107,9 +107,7 @@ class MailChimp_WooCommerce_Single_Order extends Mailchimp_Woocommerce_Job
             return false;
         }
 
-        $order_post_type_list = apply_filters( 'mailchimp_should_push_order_post_type_list', [
-            'shop_order'
-        ]);
+        $order_post_type_list = mailchimp_get_order_post_type_list();
 
         if ( ! in_array( $this->woo_order->get_type(), $order_post_type_list ) ) {
             mailchimp_log('filter', "Order {$woo_order_number} was skipped by the filter");

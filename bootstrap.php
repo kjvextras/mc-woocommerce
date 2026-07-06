@@ -1334,17 +1334,43 @@ function mailchimp_get_product_categories_count() {
 }
 
 /**
+ * Order post types the plugin should handle. Always returns an array.
+ * Third parties can extend the list via wc_register_order_type + the
+ * 'wc_order_types' filter (with $for === 'mailchimp'), adjust what gets
+ * excluded via the 'mailchimp_order_post_type_exclude_list' filter, or
+ * override the final list via the 'mailchimp_should_push_order_post_type_list'
+ * filter.
+ *
+ * @return array
+ */
+function mailchimp_get_order_post_type_list() {
+    $types = function_exists('wc_get_order_types')
+        ? wc_get_order_types('mailchimp')
+        : array('shop_order');
+
+    // guard against calls made before order types are registered
+    if (empty($types)) {
+        $types = array('shop_order');
+    }
+
+    // refunds are registered as an order type but must never be pushed as orders
+    $excluded = apply_filters('mailchimp_order_post_type_exclude_list', array('shop_order_refund'));
+    $types = array_values(array_diff((array) $types, (array) $excluded));
+
+    $types = (array) apply_filters('mailchimp_should_push_order_post_type_list', $types);
+
+    return array_values(array_unique($types));
+}
+
+/**
  * @return int
  */
 function mailchimp_get_order_count() {
-    return wc_orders_count('completed');
-//    $posts = mailchimp_count_posts('shop_order');
-//    unset($posts['auto-draft'], $posts['trash']);
-//    $total = 0;
-//    foreach ($posts as $status => $count) {
-//        $total += $count;
-//    }
-//    return $total;
+    $total = 0;
+    foreach (mailchimp_get_order_post_type_list() as $type) {
+        $total += (int) wc_orders_count('completed', $type);
+    }
+    return $total;
 }
 
 /**
@@ -1374,7 +1400,7 @@ function mailchimp_get_customer_lookup_count_all() {
  */
 function mailchimp_count_posts($type) {
     global $wpdb;
-    if ($type === 'shop_order') {
+    if (in_array($type, mailchimp_get_order_post_type_list(), true)) {
         $query = "SELECT post_status, COUNT( * ) AS num_posts FROM {$wpdb->posts} WHERE post_type = %s AND post_status = %s";
         $posts = $wpdb->get_results( $wpdb->prepare($query, $type, 'wc-completed'));
     } else {

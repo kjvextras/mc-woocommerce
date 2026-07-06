@@ -396,7 +396,7 @@ class MailChimp_WooCommerce_Transform_Orders {
         $limit = $posts + 1;
 
         $params = array(
-			'post_type'      => 'shop_order',
+			'post_type'      => mailchimp_get_order_post_type_list(),
             'post_status'    => 'wc-completed',
 			'posts_per_page' => $limit,
 			'offset'         => $offset,
@@ -436,6 +436,7 @@ class MailChimp_WooCommerce_Transform_Orders {
 		$orders = wc_get_orders(
 			array(
 				'customer' => trim( $order->get_billing_email() ),
+				'type'     => mailchimp_get_order_post_type_list(),
 			)
 		);
 
