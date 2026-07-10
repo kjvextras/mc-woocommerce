@@ -736,7 +736,18 @@ class MailChimp_Service extends MailChimp_WooCommerce_Options
     {
         if (!mailchimp_is_configured()) return;
 
-        $subscribed = (bool) isset($_POST['mailchimp_woocommerce_newsletter']) && $_POST['mailchimp_woocommerce_newsletter'];
+
+        if (isset($_POST['mailchimp_woocommerce_newsletter'])) {
+            $subscribed = (bool)isset($_POST['mailchimp_woocommerce_newsletter']) && $_POST['mailchimp_woocommerce_newsletter'];
+        } else {
+            // if no status posted, get the status from existing MC users
+            $user = new WP_User($user_id);
+            $email = $user->user_email;
+
+            $status = mailchimp_get_subscriber_status($email);
+
+            $subscribed = $status === 'subscribed';
+        }
 
         if (isset($_POST['mailchimp_woocommerce_newsletter']) && $_POST['mailchimp_woocommerce_newsletter']) {
             $gdpr_fields = isset($_POST['mailchimp_woocommerce_gdpr']) ?
