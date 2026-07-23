@@ -92,7 +92,7 @@ class MailChimp_WooCommerce
         $username = $is_options && array_key_exists('mailchimp_account_info_username', $plugin_options) ?
             $plugin_options['mailchimp_account_info_username'] : false;
 
-        $api_key_parts = str_getcsv($api_key, '-');
+        $api_key_parts = str_getcsv($api_key, '-', '"', '');
         $data_center = isset($api_key_parts[1]) ? $api_key_parts[1] : 'us1';
 
         return static::$logging_config = (object)array(
