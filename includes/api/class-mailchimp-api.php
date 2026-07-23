@@ -68,7 +68,7 @@ class MailChimp_WooCommerce_MailChimpApi {
 	 * @return $this
 	 */
 	public function setApiKey( $key ) {
-		$parts = str_getcsv( $key, '-' );
+		$parts = str_getcsv( $key, '-' , '"', '');
 
 		if ( count( $parts ) == 2 ) {
 			$this->data_center = $parts[1];
