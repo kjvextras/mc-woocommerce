@@ -1596,7 +1596,7 @@ function mailchimp_hash_trim_lower($str) {
  */
 function mailchimp_get_wc_customer($email) {
     global $wpdb;
-    return $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}wc_customer_lookup` WHERE `email` = '{$email}'" );
+    return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM `{$wpdb->prefix}wc_customer_lookup` WHERE `email` = %s", $email ) );
 }
 
 /**
