@@ -563,7 +563,7 @@ class MailChimp_Service extends MailChimp_WooCommerce_Options
     }
 
     /**
-     * Fire new order and order save handling/queueing events when a shop_order post is saved.
+     * Fire new order and order save handling/queueing events when an order of a supported type is saved.
      *
      * @param $order_id
      * @param $order

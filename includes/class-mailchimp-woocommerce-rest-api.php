@@ -838,6 +838,7 @@ class MailChimp_WooCommerce_Rest_Api
                         $platform = $wc_customer;
                         $orders = wc_get_orders( array(
                             'customer' => $body['resource_id'],
+                            'type' => mailchimp_get_order_post_type_list(),
                             'limit' => 1,
                             'orderby' => 'date',
                             'order' => 'DESC',
