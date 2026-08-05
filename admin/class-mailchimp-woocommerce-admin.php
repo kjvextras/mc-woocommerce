@@ -573,6 +573,18 @@ class MailChimp_WooCommerce_Admin extends MailChimp_WooCommerce_Options {
             // we have some stores that are in a perpetual state of syncing - causing issues with support.
             // trying to adjust things on plugin update
 			//$this->fix_is_syncing_problem();
+
+			// Stores that completed a sync on older versions can still carry a
+			// stale sync.initial_sync flag, which makes every API call send
+			// X-Data-Mode: historical — live orders get treated as historical
+			// data. Only safe to clear when no sync is running; an in-flight
+			// initial sync legitimately needs the flag.
+			if ( ! (bool) mailchimp_get_data( 'sync.syncing' ) ) {
+				\Mailchimp_Woocommerce_DB_Helpers::delete_option( 'mailchimp-woocommerce-sync.initial_sync' );
+				// rebuild the per-request env snapshot so the rest of this
+				// request stops sending the historical header immediately.
+				mailchimp_environment_variables( true );
+			}
 		}
 
 		// Carts-table one-time cleanup: add PRIMARY KEY on email column and
